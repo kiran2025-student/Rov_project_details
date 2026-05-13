@@ -1,0 +1,6 @@
+adafruit-circuitpython-bno055
+adafruit-blinka
+smbus2
+numpy
+pandas
+opencv-python
