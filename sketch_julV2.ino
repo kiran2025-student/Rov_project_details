@@ -1,3 +1,6 @@
+//this firmware is made for the testing of the two senors indiviual with low level MCI to verify the working of the 
+//sensor and it collected the roll pitch yaw acurateltly and the CSV file for the data is also provided in this repo 
+//with the name of V2 result CSV check it out for the PID tuning and all.
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
