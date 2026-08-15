@@ -1,172 +1,259 @@
-#include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
-#include <utility/imumaths.h>
+#!/usr/bin/env python3
+"""
+================================================================================
+ Dual BNO055 IMU Reader — Roll / Pitch / Yaw (Human Readable)
+================================================================================
 
-// Initialize two BNO055 instances with distinct I2C addresses
-Adafruit_BNO055 bno1 = Adafruit_BNO055(55, 0x28); // Sensor 1 (ADR to GND)
-Adafruit_BNO055 bno2 = Adafruit_BNO055(56, 0x29); // Sensor 2 (ADR to 3.3V)
+WHAT THIS SCRIPT DOES
+----------------------
+Reads orientation data from ONE or TWO Bosch BNO055 9-DOF IMU sensors
+connected on the same I2C bus, and prints/returns the orientation as
+human-readable Roll, Pitch, and Yaw angles in degrees.
 
-// Telemetry structures
-struct SensorData {
-  float heading;
-  float roll;
-  float pitch;
-  String headingDir;
-  String rollDir;
-  String pitchDir;
-};
+The BNO055 has an internal sensor-fusion processor, so it directly outputs
+absolute orientation (no manual quaternion/DCM math required on the host).
+We still show how to convert its quaternion output to Euler angles manually,
+in case you ever need custom fusion or want to avoid gimbal-lock issues with
+the sensor's built-in Euler output.
 
-SensorData sensor1;
-SensorData sensor2;
+HARDWARE REQUIRED
+------------------
+  - Raspberry Pi (any model with an I2C-capable header, e.g. Raspberry Pi 5)
+  - 2 x Adafruit/generic BNO055 breakout boards
+  - Jumper wires
+  - (Optional) External 3.3V/5V supply if powering more peripherals
 
-int readCount = 0;
+WIRING / CONNECTION (see BNO055_Wiring_Guide.md for diagram + full detail)
+----------------------------------------------------------------------------
+  BNO055 #1 (Primary)          Raspberry Pi
+  --------------------          -------------------
+  VIN   ----------------------  3.3V or 5V (Pin 1 or 2 — check your board's
+                                 regulator; Adafruit breakout accepts 3-5V)
+  GND   ----------------------  GND (Pin 6)
+  SDA   ----------------------  GPIO2 / SDA1 (Pin 3)
+  SCL   ----------------------  GPIO3 / SCL1 (Pin 5)
+  ADR   ----------------------  GND  -> I2C address 0x28 (default, ADR low)
 
-// Function Prototypes
-void readSensors();
-void calculateDirections(SensorData &data);
-void printTelemetry(const String &name, const SensorData &data);
-void printCSV();
+  BNO055 #2 (Secondary)        Raspberry Pi
+  --------------------          -------------------
+  VIN   ----------------------  3.3V or 5V (shared rail with sensor #1)
+  GND   ----------------------  GND (shared with sensor #1)
+  SDA   ----------------------  GPIO2 / SDA1 (Pin 3)   <- SAME bus, shared
+  SCL   ----------------------  GPIO3 / SCL1 (Pin 5)   <- SAME bus, shared
+  ADR   ----------------------  3.3V -> I2C address 0x29 (ADR pulled HIGH)
 
-void setup()
-{
-  Serial.begin(9600);
-  while (!Serial && millis() < 4000); // Wait for Serial monitor on USB boards
+  Both sensors share the same two I2C wires (SDA/SCL). The ADR pin is what
+  gives them two different addresses (0x28 and 0x29) so the Pi can tell them
+  apart on the same bus. This is the standard way to run 2 BNO055 units off
+  one I2C controller without a multiplexer.
 
-  Serial.println("=================================");
-  Serial.println("   DUAL BNO055 ORIENTATION SYSTEM");
-  Serial.println("=================================");
+REQUIRED PYTHON LIBRARIES (install on the Raspberry Pi)
+----------------------------------------------------------
+  sudo pip3 install --break-system-packages \
+      adafruit-circuitpython-bno055 \
+      adafruit-blinka
 
-  // Initialize Sensor 1 (0x28)
-  if (!bno1.begin())
-  {
-    Serial.println("ERROR: Sensor 1 (0x28) not detected! Check wiring/ADR pin.");
-    while (1);
-  }
+  Also enable I2C first:
+      sudo raspi-config  ->  Interface Options -> I2C -> Enable
 
-  // Initialize Sensor 2 (0x29)
-  if (!bno2.begin())
-  {
-    Serial.println("ERROR: Sensor 2 (0x29) not detected! Check wiring/ADR pin.");
-    while (1);
-  }
+  Verify both sensors are visible on the bus:
+      i2cdetect -y 1
+      (You should see devices at 0x28 and 0x29)
 
-  delay(1000);
+AUTHOR NOTE
+------------
+This script is written to be READ, not just run — every section is commented
+so it can go straight into your project report / documentation.
+================================================================================
+"""
 
-  // Enable external crystal on both units for better precision
-  bno1.setExtCrystalUse(true);
-  bno2.setExtCrystalUse(true);
+import time
+import math
+import sys
 
-  Serial.println("Both BNO055 Sensors Initialized Successfully!");
-  Serial.println();
-}
+import board
+import busio
+import adafruit_bno055
 
-void loop()
-{
-  readSensors();
 
-  calculateDirections(sensor1);
-  calculateDirections(sensor2);
+# --------------------------------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------------------------------
 
-  // Print individual telemetry blocks
-  printTelemetry("SENSOR 1 (0x28)", sensor1);
-  printTelemetry("SENSOR 2 (0x29)", sensor2);
+# I2C addresses of the two BNO055 sensors, set via the ADR pin (see wiring
+# guide above). 0x28 = ADR tied to GND (default). 0x29 = ADR tied to 3.3V.
+SENSOR_1_ADDRESS = 0x28
+SENSOR_2_ADDRESS = 0x29
 
-  // Print combined CSV row
-  printCSV();
+# How often to poll the sensors, in seconds.
+READ_INTERVAL_S = 0.1  # 10 Hz
 
-  delay(1000); // Adjust polling rate as needed
-}
+# Set to True if you only have ONE sensor connected and want to skip sensor 2.
+SINGLE_SENSOR_MODE = False
 
-// Read raw orientation vectors from both devices
-void readSensors()
-{
-  sensors_event_t event1, event2;
 
-  bno1.getEvent(&event1);
-  sensor1.heading = event1.orientation.x;
-  sensor1.roll    = event1.orientation.y;
-  sensor1.pitch   = event1.orientation.z;
+# --------------------------------------------------------------------------
+# QUATERNION -> EULER (ROLL / PITCH / YAW) CONVERSION
+# --------------------------------------------------------------------------
+def quaternion_to_euler(w, x, y, z):
+    """
+    Convert a quaternion (w, x, y, z) into Roll, Pitch, Yaw angles in degrees.
 
-  bno2.getEvent(&event2);
-  sensor2.heading = event2.orientation.x;
-  sensor2.roll    = event2.orientation.y;
-  sensor2.pitch   = event2.orientation.z;
-}
+    This is provided as a manual reference / fallback. The BNO055 also
+    exposes `sensor.euler` directly (its own onboard fusion output), which
+    is what this script uses by default since it's more robust to gimbal
+    lock than a naive quaternion->Euler conversion. Both are shown so you
+    can compare or substitute one for the other.
 
-// Direction processing helper (applied to any SensorData instance)
-void calculateDirections(SensorData &data)
-{
-  // Heading / Compass Direction
-  if (data.heading >= 337.5 || data.heading < 22.5)
-    data.headingDir = "North";
-  else if (data.heading < 67.5)
-    data.headingDir = "North-East";
-  else if (data.heading < 112.5)
-    data.headingDir = "East";
-  else if (data.heading < 157.5)
-    data.headingDir = "South-East";
-  else if (data.heading < 202.5)
-    data.headingDir = "South";
-  else if (data.heading < 247.5)
-    data.headingDir = "South-West";
-  else if (data.heading < 292.5)
-    data.headingDir = "West";
-  else
-    data.headingDir = "North-West";
+    Convention used: aerospace / body-frame standard
+      Roll  (phi)   -> rotation about the X axis (tilt left/right)
+      Pitch (theta) -> rotation about the Y axis (tilt forward/back)
+      Yaw   (psi)   -> rotation about the Z axis (compass heading)
+    """
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
 
-  // Roll Status
-  if (data.roll > 5.0)
-    data.rollDir = "Right Roll";
-  else if (data.roll < -5.0)
-    data.rollDir = "Left Roll";
-  else
-    data.rollDir = "Level";
+    # Pitch (y-axis rotation)
+    sinp = 2 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        pitch = math.copysign(math.pi / 2, sinp)  # clamp at +/-90 deg (gimbal lock)
+    else:
+        pitch = math.asin(sinp)
 
-  // Pitch Status
-  if (data.pitch > 5.0)
-    data.pitchDir = "Nose Up";
-  else if (data.pitch < -5.0)
-    data.pitchDir = "Nose Down";
-  else
-    data.pitchDir = "Level";
-}
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
 
-// Formatted Telemetry Print
-void printTelemetry(const String &name, const SensorData &data)
-{
-  Serial.print("---------------------------------\n");
-  Serial.print("        "); Serial.println(name);
-  Serial.print("---------------------------------\n");
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
-  Serial.print("Heading : ");
-  Serial.print(data.heading, 1);
-  Serial.print("° (");
-  Serial.print(data.headingDir);
-  Serial.println(")");
 
-  Serial.print("Roll    : ");
-  Serial.print(data.roll, 1);
-  Serial.print("° (");
-  Serial.print(data.rollDir);
-  Serial.println(")");
+# --------------------------------------------------------------------------
+# SENSOR WRAPPER CLASS
+# --------------------------------------------------------------------------
+class BNO055Sensor:
+    """
+    Thin wrapper around adafruit_bno055.BNO055_I2C that gives back clean,
+    human-readable Roll/Pitch/Yaw plus basic health/status info.
+    """
 
-  Serial.print("Pitch   : ");
-  Serial.print(data.pitch, 1);
-  Serial.print("° (");
-  Serial.print(data.pitchDir);
-  Serial.println(")");
-}
+    def __init__(self, i2c_bus, address, name="IMU"):
+        self.name = name
+        self.address = address
+        try:
+            self.sensor = adafruit_bno055.BNO055_I2C(i2c_bus, address=address)
+            # NDOF mode = full 9-DOF absolute orientation fusion
+            # (accelerometer + gyroscope + magnetometer). This is the
+            # default mode of the library, set explicitly here for clarity.
+            self.sensor.mode = adafruit_bno055.NDOF_MODE
+            self.connected = True
+        except (OSError, ValueError) as e:
+            print(f"[{self.name}] ERROR: could not connect at address "
+                  f"0x{address:02X} -> {e}")
+            self.sensor = None
+            self.connected = False
 
-// Combined CSV Log Output
-void printCSV()
-{
-  Serial.println("\n--- CSV Output [H1,R1,P1,H2,R2,P2] ---");
-  Serial.print(sensor1.heading, 2); Serial.print(",");
-  Serial.print(sensor1.roll, 2);    Serial.print(",");
-  Serial.print(sensor1.pitch, 2);   Serial.print(",");
-  Serial.print(sensor2.heading, 2); Serial.print(",");
-  Serial.print(sensor2.roll, 2);    Serial.print(",");
-  Serial.println(sensor2.pitch, 2);
-  Serial.println("=================================\n");
-}
+    def read_orientation(self):
+        """
+        Returns a dict with roll, pitch, yaw (degrees, human-readable),
+        plus the calibration status of the sensor.
+
+        Returns None if the sensor is not connected or a read fails.
+        """
+        if not self.connected or self.sensor is None:
+            return None
+
+        try:
+            # sensor.euler returns (heading, roll, pitch) in degrees, where
+            # heading == yaw (0-360, compass-style). This is the BNO055's
+            # own onboard sensor-fusion output — no manual math needed.
+            heading, roll, pitch = self.sensor.euler
+
+            if heading is None or roll is None or pitch is None:
+                return None  # sensor hasn't produced a valid fusion reading yet
+
+            # Calibration status: 0 (uncalibrated) - 3 (fully calibrated)
+            # for (system, gyro, accelerometer, magnetometer)
+            sys_cal, gyro_cal, accel_cal, mag_cal = self.sensor.calibration_status
+
+            return {
+                "name": self.name,
+                "address": hex(self.address),
+                "roll_deg": round(roll, 2),
+                "pitch_deg": round(pitch, 2),
+                "yaw_deg": round(heading, 2),
+                "calibration": {
+                    "system": sys_cal,
+                    "gyro": gyro_cal,
+                    "accel": accel_cal,
+                    "mag": mag_cal,
+                },
+            }
+        except (OSError, RuntimeError) as e:
+            print(f"[{self.name}] Read error: {e}")
+            return None
+
+    def is_calibrated(self):
+        """Returns True once the system calibration status reaches 3 (fully calibrated)."""
+        data = self.read_orientation()
+        return data is not None and data["calibration"]["system"] == 3
+
+
+# --------------------------------------------------------------------------
+# HUMAN-READABLE PRINTING
+# --------------------------------------------------------------------------
+def format_reading(data):
+    """Turn a sensor reading dict into a clean one-line human-readable string."""
+    if data is None:
+        return "No data (sensor not connected or not ready)"
+
+    cal = data["calibration"]
+    return (
+        f"[{data['name']} @ {data['address']}]  "
+        f"Roll: {data['roll_deg']:7.2f}°   "
+        f"Pitch: {data['pitch_deg']:7.2f}°   "
+        f"Yaw: {data['yaw_deg']:7.2f}°   "
+        f"(Cal S:{cal['system']} G:{cal['gyro']} A:{cal['accel']} M:{cal['mag']})"
+    )
+
+
+# --------------------------------------------------------------------------
+# MAIN LOOP
+# --------------------------------------------------------------------------
+def main():
+    # Set up the shared I2C bus (both sensors sit on this same bus).
+    i2c = busio.I2C(board.SCL, board.SDA)
+
+    imu1 = BNO055Sensor(i2c, SENSOR_1_ADDRESS, name="IMU-1")
+
+    imu2 = None
+    if not SINGLE_SENSOR_MODE:
+        imu2 = BNO055Sensor(i2c, SENSOR_2_ADDRESS, name="IMU-2")
+
+    if not imu1.connected and (imu2 is None or not imu2.connected):
+        print("No BNO055 sensors detected. Check wiring and run "
+              "'i2cdetect -y 1' to confirm addresses 0x28 / 0x29 are present.")
+        sys.exit(1)
+
+    print("Starting IMU read loop. Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            reading1 = imu1.read_orientation()
+            print(format_reading(reading1))
+
+            if imu2 is not None:
+                reading2 = imu2.read_orientation()
+                print(format_reading(reading2))
+
+            print("-" * 70)
+            time.sleep(READ_INTERVAL_S)
+
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+
+
+if __name__ == "__main__":
+    main()
