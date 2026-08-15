@@ -137,9 +137,24 @@ I2C_FREQUENCY_HZ = 400000
 
 # How often to print to the console. Printing every cycle (10Hz here) can
 # itself become the loop's bottleneck, since terminal I/O is slower than
-# the I2C reads it's reporting on. Logging to CSV stays at full rate
-# regardless — this only throttles what's echoed to the screen.
-PRINT_EVERY_N_CYCLES = 1  # set higher (e.g. 5) to print less often
+# the I2C reads it's reporting on — at the default 10Hz READ_INTERVAL_S,
+# printing every cycle produces 30 lines/second of continuous scroll,
+# which reads as constant flicker and makes it easy to mistake fast
+# scrolling for "printing multiple times." CSV logging always stays at
+# full rate regardless of this setting — this only throttles the screen.
+PRINT_EVERY_N_CYCLES = 5  # print ~2x/second instead of 10x/second
+
+# How the console output is drawn:
+#   "dashboard" - overwrites the same lines in place each refresh (like
+#                 `top`), so the screen holds still instead of scrolling.
+#                 This is the fix for output that looks like it's
+#                 "blinking" — that was continuous scrolling text, not an
+#                 actual data problem.
+#   "scroll"    - the original behavior: each reading is printed as a new
+#                 line and old lines scroll up and off screen. Useful if
+#                 you're piping output to a file or `tee`, where you want
+#                 a full history rather than a live-updating view.
+DISPLAY_MODE = "scroll"
 
 # How often to flush the CSV file to disk (in cycles). Flushing every
 # cycle guarantees minimal data loss on a hard crash but adds disk I/O
@@ -320,18 +335,62 @@ class BNO055Sensor:
 # HUMAN-READABLE PRINTING
 # --------------------------------------------------------------------------
 def format_reading(data):
-    """Turn a sensor reading dict into a clean one-line human-readable string."""
+    """
+    Turn a sensor reading dict into a clean one-line human-readable string.
+
+    Appends an explicit warning when system calibration is 0. Per
+    Adafruit's own BNO055 documentation: system cal '0' in NDOF mode means
+    the sensor hasn't found magnetic north yet, and orientation data
+    (especially Yaw) should be treated as unreliable until it climbs above
+    0 -- this is exactly what produces "jittery/changing values on a
+    physically static sensor," which is expected, not a bug.
+    """
     if data is None:
         return "No data (sensor not connected or not ready)"
 
     cal = data["calibration"]
+    warning = ""
+    if cal["system"] == 0:
+        warning = "  ⚠ UNCALIBRATED (rotate sensor / figure-8 motion needed)"
+
     return (
         f"[{data['name']} @ {data['address']}]  "
         f"Roll: {data['roll_deg']:7.2f}°   "
         f"Pitch: {data['pitch_deg']:7.2f}°   "
         f"Yaw: {data['yaw_deg']:7.2f}°   "
         f"(Cal S:{cal['system']} G:{cal['gyro']} A:{cal['accel']} M:{cal['mag']})"
+        f"{warning}"
     )
+
+
+# ANSI escape codes used to redraw lines in place instead of scrolling.
+# \033[{n}A moves the cursor up n lines; \033[K clears from the cursor to
+# the end of the current line (so leftover characters from a longer
+# previous line don't linger). This is the same technique tools like
+# `top` and `htop` use for a live-updating display without flicker.
+_ANSI_CURSOR_UP = "\033[{n}A"
+_ANSI_CLEAR_LINE = "\033[K"
+
+
+def render_dashboard(lines, is_first_draw):
+    """
+    Draws `lines` to the terminal, overwriting the previous draw in place
+    rather than scrolling. This is what actually fixes "the display keeps
+    blinking" — that was continuous scrolling text (new lines pushing old
+    ones up and off screen), not a data problem. Redrawing the same fixed
+    block in place holds the screen still.
+
+    We deliberately do NOT do a full screen clear (os.system('clear') or
+    '\\033[2J') every cycle — that causes a visible blank-then-redraw flash
+    on most terminals (especially over SSH), which is often worse than
+    the scrolling it's meant to fix. Clearing only the lines we're about
+    to overwrite avoids that.
+    """
+    if not is_first_draw:
+        sys.stdout.write(_ANSI_CURSOR_UP.format(n=len(lines)))
+    for line in lines:
+        sys.stdout.write(_ANSI_CLEAR_LINE + line + "\n")
+    sys.stdout.flush()
 
 
 # --------------------------------------------------------------------------
@@ -436,10 +495,15 @@ def setup_sensors():
 
 def run_read_loop(imu1, imu2, csv_file, csv_writer):
     """
-    The live loop: reads both sensors, prints (throttled), logs to CSV
+    The live loop: reads both sensors, displays (throttled), logs to CSV
     (throttled flush), and holds a fixed sample rate. Runs until Ctrl+C.
+
+    Display mode is controlled by DISPLAY_MODE:
+      "dashboard" - redraws the same lines in place (no scrolling/flicker)
+      "scroll"    - prints new lines each refresh, old ones scroll away
     """
     cycle = 0
+    is_first_draw = True
     try:
         while True:
             # Fixed-rate scheduling: anchor to the time BEFORE this
@@ -453,28 +517,38 @@ def run_read_loop(imu1, imu2, csv_file, csv_writer):
             should_print = cycle % PRINT_EVERY_N_CYCLES == 0
 
             reading1 = imu1.read_orientation()
-            if should_print:
-                print(format_reading(reading1))
             log_reading_to_csv(csv_writer, reading1)
 
+            reading2 = None
             if imu2 is not None:
                 reading2 = imu2.read_orientation()
-                if should_print:
-                    print(format_reading(reading2))
                 log_reading_to_csv(csv_writer, reading2)
+
+            if should_print:
+                lines = [format_reading(reading1)]
+                if imu2 is not None:
+                    lines.append(format_reading(reading2))
+
+                if DISPLAY_MODE == "dashboard":
+                    render_dashboard(lines, is_first_draw)
+                    is_first_draw = False
+                else:
+                    for line in lines:
+                        print(line)
+                    print("-" * 70)
 
             if cycle % CSV_FLUSH_EVERY_N_CYCLES == 0:
                 csv_file.flush()  # ensure rows are on disk periodically,
                                    # even if the script is killed rather
                                    # than exited cleanly
 
-            if should_print:
-                print("-" * 70)
-
             elapsed = time.monotonic() - cycle_start
             time.sleep(max(0.0, READ_INTERVAL_S - elapsed))
 
     except KeyboardInterrupt:
+        # In dashboard mode the cursor is sitting mid-block; print a blank
+        # line first so "Stopped by user." doesn't land on top of the
+        # last reading.
         print("\nStopped by user.")
 
 
