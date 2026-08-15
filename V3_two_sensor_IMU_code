@@ -154,7 +154,7 @@ PRINT_EVERY_N_CYCLES = 5  # print ~2x/second instead of 10x/second
 #                 line and old lines scroll up and off screen. Useful if
 #                 you're piping output to a file or `tee`, where you want
 #                 a full history rather than a live-updating view.
-DISPLAY_MODE = "scroll"
+DISPLAY_MODE = "dashboard"
 
 # How often to flush the CSV file to disk (in cycles). Flushing every
 # cycle guarantees minimal data loss on a hard crash but adds disk I/O
@@ -385,11 +385,20 @@ def render_dashboard(lines, is_first_draw):
     on most terminals (especially over SSH), which is often worse than
     the scrolling it's meant to fix. Clearing only the lines we're about
     to overwrite avoids that.
+
+    Everything is assembled into ONE string and written with a single
+    write()+flush() call, rather than one write() per line. Over SSH a
+    terminal is normally line-buffered, so several separate writes mean
+    several separate network round-trips per cycle — which can itself
+    look like stutter/flicker on a laggier connection. One write = one
+    round-trip per redraw.
     """
+    block = ""
     if not is_first_draw:
-        sys.stdout.write(_ANSI_CURSOR_UP.format(n=len(lines)))
-    for line in lines:
-        sys.stdout.write(_ANSI_CLEAR_LINE + line + "\n")
+        block += _ANSI_CURSOR_UP.format(n=len(lines))
+    block += "".join(_ANSI_CLEAR_LINE + line + "\n" for line in lines)
+
+    sys.stdout.write(block)
     sys.stdout.flush()
 
 
@@ -533,9 +542,12 @@ def run_read_loop(imu1, imu2, csv_file, csv_writer):
                     render_dashboard(lines, is_first_draw)
                     is_first_draw = False
                 else:
-                    for line in lines:
-                        print(line)
-                    print("-" * 70)
+                    # Single write for the same reason as render_dashboard:
+                    # one write() = one network round-trip per cycle over
+                    # SSH, instead of one per line.
+                    block = "\n".join(lines) + "\n" + ("-" * 70) + "\n"
+                    sys.stdout.write(block)
+                    sys.stdout.flush()
 
             if cycle % CSV_FLUSH_EVERY_N_CYCLES == 0:
                 csv_file.flush()  # ensure rows are on disk periodically,
