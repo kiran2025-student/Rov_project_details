@@ -60,16 +60,40 @@ REQUIRED PYTHON LIBRARIES (install on the Raspberry Pi)
       i2cdetect -y 1
       (You should see devices at 0x28 and 0x29)
 
-AUTHOR NOTE
+CSV LOGGING
 ------------
-This script is written to be READ, not just run — every section is commented
-so it can go straight into your project report / documentation.
+Every successful reading is appended to a timestamped CSV file (see
+CSV_LOG_PATH below) with columns:
+    timestamp, sensor_name, address, roll_deg, pitch_deg, yaw_deg,
+    cal_system, cal_gyro, cal_accel, cal_mag
+This gives you a permanent record you can open in Excel/Sheets or plot
+later (e.g. to check drift over a test run), without changing the live
+console output.
+
+DEBUGGING NOTES (learned while building/testing this script)
+----------------------------------------------------------------
+- The BNO055_I2C constructor already sets NDOF_MODE by default (confirmed
+  from the library source) — explicitly setting it again is redundant but
+  harmless; kept here only for readability.
+- sensor.euler returns (heading, roll, pitch) in that exact order — the
+  register layout on the chip is Heading/Roll/Pitch, NOT Roll/Pitch/Yaw.
+  Unpacking it in the wrong order silently swaps your axes.
+- The library exposes sensor.calibrated (bool) directly — no need to
+  re-derive calibration state from a second full read.
+- I2C reads can fail transiently (loose wiring, electrical noise) even on
+  a correctly-wired bus. A single OSError/RuntimeError shouldn't kill the
+  whole session — retry a couple of times first.
+- Reading calibration_status on every single loop cycle is wasted I2C
+  traffic, since calibration state changes over seconds, not milliseconds.
 ================================================================================
 """
 
+import csv
+import os
 import time
 import math
 import sys
+from datetime import datetime
 
 import board
 import busio
@@ -90,6 +114,31 @@ READ_INTERVAL_S = 0.1  # 10 Hz
 
 # Set to True if you only have ONE sensor connected and want to skip sensor 2.
 SINGLE_SENSOR_MODE = False
+
+# How many I2C read retries to attempt before giving up on a single cycle.
+# I2C errors are usually transient (noise, a loose wire) rather than fatal,
+# so a couple of quick retries avoids dropping data unnecessarily.
+READ_RETRIES = 2
+RETRY_DELAY_S = 0.01
+
+# Calibration status changes slowly (over seconds) compared to orientation
+# (which changes every cycle), so we only re-read it every N cycles instead
+# of on every single loop iteration. This cuts I2C bus traffic roughly in
+# half per sensor without losing any meaningful information.
+CALIBRATION_READ_EVERY_N_CYCLES = 10
+
+# CSV logging: every successful reading is appended here as it's read.
+# A fresh, timestamped file is created each time the script starts so
+# separate test runs don't overwrite each other.
+CSV_LOG_DIR = "logs"
+CSV_LOG_PATH = os.path.join(
+    CSV_LOG_DIR, f"imu_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+)
+CSV_COLUMNS = [
+    "timestamp", "sensor_name", "address",
+    "roll_deg", "pitch_deg", "yaw_deg",
+    "cal_system", "cal_gyro", "cal_accel", "cal_mag",
+]
 
 
 # --------------------------------------------------------------------------
@@ -142,11 +191,18 @@ class BNO055Sensor:
     def __init__(self, i2c_bus, address, name="IMU"):
         self.name = name
         self.address = address
+        self.address_hex = hex(address)  # cached — computed once, not every read
+        self._cycle_count = 0
+        # Last-known calibration tuple, reused between throttled re-reads
+        # (see CALIBRATION_READ_EVERY_N_CYCLES). Starts at all-zero
+        # (uncalibrated) until the first real read comes in.
+        self._last_calibration = (0, 0, 0, 0)
         try:
             self.sensor = adafruit_bno055.BNO055_I2C(i2c_bus, address=address)
-            # NDOF mode = full 9-DOF absolute orientation fusion
-            # (accelerometer + gyroscope + magnetometer). This is the
-            # default mode of the library, set explicitly here for clarity.
+            # NOTE: BNO055_I2C already sets NDOF_MODE by default in its own
+            # constructor (confirmed from the library source) — this line
+            # is redundant in practice, kept only so the intent ("we want
+            # full 9-DOF fusion") is explicit in this file too.
             self.sensor.mode = adafruit_bno055.NDOF_MODE
             self.connected = True
         except (OSError, ValueError) as e:
@@ -160,45 +216,82 @@ class BNO055Sensor:
         Returns a dict with roll, pitch, yaw (degrees, human-readable),
         plus the calibration status of the sensor.
 
-        Returns None if the sensor is not connected or a read fails.
+        Returns None if the sensor is not connected or every retry fails.
+
+        Includes a couple of I2C-specific debugging lessons learned:
+          - Retries a transient bus error a few times before giving up,
+            since a single OSError on I2C is often noise/a loose wire
+            rather than a real fault.
+          - Only re-reads calibration_status every N cycles instead of on
+            every call, since calibration changes far slower than
+            orientation does. This halves I2C traffic per sensor with no
+            real loss of information.
         """
         if not self.connected or self.sensor is None:
             return None
 
-        try:
-            # sensor.euler returns (heading, roll, pitch) in degrees, where
-            # heading == yaw (0-360, compass-style). This is the BNO055's
-            # own onboard sensor-fusion output — no manual math needed.
-            heading, roll, pitch = self.sensor.euler
+        self._cycle_count += 1
+        should_read_calibration = (
+            self._cycle_count == 1
+            or self._cycle_count % CALIBRATION_READ_EVERY_N_CYCLES == 0
+        )
 
-            if heading is None or roll is None or pitch is None:
-                return None  # sensor hasn't produced a valid fusion reading yet
+        for attempt in range(READ_RETRIES + 1):
+            try:
+                # sensor.euler returns (heading, roll, pitch) in degrees —
+                # this exact order matches the chip's register layout
+                # (Heading, then Roll, then Pitch). Unpacking it in the
+                # "obvious" Roll/Pitch/Yaw order silently swaps two axes.
+                heading, roll, pitch = self.sensor.euler
 
-            # Calibration status: 0 (uncalibrated) - 3 (fully calibrated)
-            # for (system, gyro, accelerometer, magnetometer)
-            sys_cal, gyro_cal, accel_cal, mag_cal = self.sensor.calibration_status
+                if heading is None or roll is None or pitch is None:
+                    return None  # sensor hasn't produced a valid fusion reading yet
 
-            return {
-                "name": self.name,
-                "address": hex(self.address),
-                "roll_deg": round(roll, 2),
-                "pitch_deg": round(pitch, 2),
-                "yaw_deg": round(heading, 2),
-                "calibration": {
-                    "system": sys_cal,
-                    "gyro": gyro_cal,
-                    "accel": accel_cal,
-                    "mag": mag_cal,
-                },
-            }
-        except (OSError, RuntimeError) as e:
-            print(f"[{self.name}] Read error: {e}")
-            return None
+                if should_read_calibration:
+                    # calibration_status: 0 (uncalibrated) - 3 (fully
+                    # calibrated) for (system, gyro, accelerometer,
+                    # magnetometer) — same order the library returns.
+                    self._last_calibration = self.sensor.calibration_status
+
+                sys_cal, gyro_cal, accel_cal, mag_cal = self._last_calibration
+
+                return {
+                    "name": self.name,
+                    "address": self.address_hex,
+                    "roll_deg": round(roll, 2),
+                    "pitch_deg": round(pitch, 2),
+                    "yaw_deg": round(heading, 2),
+                    "calibration": {
+                        "system": sys_cal,
+                        "gyro": gyro_cal,
+                        "accel": accel_cal,
+                        "mag": mag_cal,
+                    },
+                }
+            except (OSError, RuntimeError) as e:
+                if attempt == READ_RETRIES:
+                    print(f"[{self.name}] Read failed after "
+                          f"{READ_RETRIES} retries: {e}")
+                    return None
+                time.sleep(RETRY_DELAY_S)
+
+        return None  # unreachable, but keeps linters happy
 
     def is_calibrated(self):
-        """Returns True once the system calibration status reaches 3 (fully calibrated)."""
-        data = self.read_orientation()
-        return data is not None and data["calibration"]["system"] == 3
+        """
+        Returns True once the sensor reports full calibration.
+
+        Uses the library's own `sensor.calibrated` property directly
+        (a single cheap register read) instead of re-deriving it from a
+        full read_orientation() call, which would waste an extra I2C
+        transaction just to check one boolean.
+        """
+        if not self.connected or self.sensor is None:
+            return False
+        try:
+            return bool(self.sensor.calibrated)
+        except (OSError, RuntimeError):
+            return False
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +313,50 @@ def format_reading(data):
 
 
 # --------------------------------------------------------------------------
+# CSV LOGGING
+# --------------------------------------------------------------------------
+def init_csv_log(path):
+    """
+    Creates the log directory and CSV file (with header row) if needed.
+    Returns the open file handle and a csv.writer bound to it.
+
+    Opened once at startup and kept open for the whole run — repeatedly
+    opening/closing the file on every reading would add unnecessary disk
+    I/O to a loop that's already doing I2C I/O every cycle.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    file_exists = os.path.isfile(path)
+
+    f = open(path, mode="a", newline="")
+    writer = csv.writer(f)
+
+    if not file_exists:
+        writer.writerow(CSV_COLUMNS)
+        f.flush()
+
+    return f, writer
+
+
+def log_reading_to_csv(writer, data):
+    """Appends one sensor reading (dict from read_orientation) as a CSV row."""
+    if data is None:
+        return
+    cal = data["calibration"]
+    writer.writerow([
+        datetime.now().isoformat(timespec="milliseconds"),
+        data["name"],
+        data["address"],
+        data["roll_deg"],
+        data["pitch_deg"],
+        data["yaw_deg"],
+        cal["system"],
+        cal["gyro"],
+        cal["accel"],
+        cal["mag"],
+    ])
+
+
+# --------------------------------------------------------------------------
 # MAIN LOOP
 # --------------------------------------------------------------------------
 def main():
@@ -237,22 +374,31 @@ def main():
               "'i2cdetect -y 1' to confirm addresses 0x28 / 0x29 are present.")
         sys.exit(1)
 
+    csv_file, csv_writer = init_csv_log(CSV_LOG_PATH)
+    print(f"Logging readings to: {CSV_LOG_PATH}")
     print("Starting IMU read loop. Press Ctrl+C to stop.\n")
 
     try:
         while True:
             reading1 = imu1.read_orientation()
             print(format_reading(reading1))
+            log_reading_to_csv(csv_writer, reading1)
 
             if imu2 is not None:
                 reading2 = imu2.read_orientation()
                 print(format_reading(reading2))
+                log_reading_to_csv(csv_writer, reading2)
 
+            csv_file.flush()  # ensure rows are on disk even if the script
+                               # is killed rather than exited cleanly
             print("-" * 70)
             time.sleep(READ_INTERVAL_S)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
+    finally:
+        csv_file.close()
+        print(f"CSV log saved: {CSV_LOG_PATH}")
 
 
 if __name__ == "__main__":
