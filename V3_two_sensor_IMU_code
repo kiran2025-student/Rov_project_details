@@ -87,16 +87,31 @@ DEBUGGING NOTES (learned while building/testing this script)
   traffic, since calibration state changes over seconds, not milliseconds.
 ================================================================================
 """
-
+# The CSV library is used to format and append data into a structured CSV logging file.
 import csv
+
+# Handles directory creation and checks if log files already exist.
 import os
+
+# Controls loop delay (time.sleep) to maintain a fixed sample rate so sensor data isn't lost or overflowing.
 import time
+
+# Provides math functions (e.g., trigonometric conversions, vector magnitudes) for custom calculations.
 import math
+
+# Provides system functions (e.g., sys.exit) to safely shut down the script if a hardware error occurs.
 import sys
+
+# Generates human-readable timestamps and calendar dates for logging.
 from datetime import datetime
 
+# Maps physical hardware pins (like board.SCL and board.SDA) on your board.
 import board
+
+# Manages the low-level I2C communication protocol over the board pins.
 import busio
+
+# High-level BNO055 sensor driver that reads onboard fusion data and exposes it as Python properties.
 import adafruit_bno055
 
 
