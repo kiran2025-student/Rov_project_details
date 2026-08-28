@@ -121,6 +121,7 @@ import adafruit_bno055
 
 # I2C addresses of the two BNO055 sensors, set via the ADR pin (see wiring
 # guide above). 0x28 = ADR tied to GND (default). 0x29 = ADR tied to 3.3V.
+#the blow two lines are the declaration of the addres of the two sensor for I2C comunication. from the main library BNO055 sensor.
 SENSOR_1_ADDRESS = 0x28
 SENSOR_2_ADDRESS = 0x29
 
