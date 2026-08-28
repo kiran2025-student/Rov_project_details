@@ -27,12 +27,12 @@ WIRING / CONNECTION (see BNO055_Wiring_Guide.md for diagram + full detail)
 ----------------------------------------------------------------------------
   BNO055 #1 (Primary)          Raspberry Pi
   --------------------          -------------------
-  VIN   ----------------------  3.3V or 5V (Pin 1 or 2 — check your board's
-                                 regulator; Adafruit breakout accepts 3-5V)
-  GND   ----------------------  GND (Pin 6)
-  SDA   ----------------------  GPIO2 / SDA1 (Pin 3)
-  SCL   ----------------------  GPIO3 / SCL1 (Pin 5)
-  ADR   ----------------------  GND  -> I2C address 0x28 (default, ADR low)
+  VIN   ----------------------  3.3V or 5V (Pin 1 or 2 — check your board's Red wire
+                                 regulator; Adafruit breakout accepts 3-5V) 
+  GND   ----------------------  GND (Pin 6) black wire
+  SDA   ----------------------  GPIO2 / SDA1 (Pin 3) Yellow wire 
+  SCL   ----------------------  GPIO3 / SCL1 (Pin 5) yelloe wire
+  ADR   ----------------------  GND  -> I2C address 0x28 (default, ADR low) green wire
 
   BNO055 #2 (Secondary)        Raspberry Pi
   --------------------          -------------------
