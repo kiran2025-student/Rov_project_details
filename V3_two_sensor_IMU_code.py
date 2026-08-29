@@ -156,6 +156,14 @@ CSV_COLUMNS = [
     "cal_system", "cal_gyro", "cal_accel", "cal_mag",
 ]
 
+# --- ADDED: threshold used by the new sensor-stability indicator -------
+# Maximum allowed change (in degrees) in Roll, Pitch, or Yaw between two
+# CONSECUTIVE readings for a sensor to be considered "STABLE". A sensor
+# that is uncalibrated, loose, or picking up magnetic interference will
+# show larger frame-to-frame jumps than this, especially in Yaw (which
+# depends on the magnetometer) — see get_stability_status() below.
+STABILITY_THRESHOLD_DEG = 2.0
+
 
 # --------------------------------------------------------------------------
 # QUATERNION -> EULER (ROLL / PITCH / YAW) CONVERSION
@@ -317,6 +325,78 @@ class BNO055Sensor:
 
 
 # --------------------------------------------------------------------------
+# ADDED: SENSOR STABILITY INDICATOR
+# This whole section is new. It does not modify BNO055Sensor above in any
+# way — it works entirely from the reading dicts that read_orientation()
+# already returns, by comparing the current reading to the previous one.
+# --------------------------------------------------------------------------
+
+# ADDED: remembers each sensor's most recent reading (keyed by sensor
+# name) so the next reading can be compared against it. Kept outside the
+# class on purpose, so BNO055Sensor itself doesn't need any changes.
+_last_readings_for_stability = {}
+
+
+def get_stability_status(sensor_name, current_reading):
+    """
+    ADDED FUNCTION: reports whether a sensor's orientation output is
+    currently STABLE or UNSTABLE, by comparing the current reading to the
+    previous reading from that same sensor.
+
+    This is a different, more direct check than the sensor's own
+    calibration numbers (already shown by format_reading()) — those
+    report the sensor's internal calibration STATE, while this reports
+    the actual frame-to-frame BEHAVIOR of the values it's producing.
+    An uncalibrated sensor, magnetic interference, a loose I2C
+    connection, or electrical noise all tend to show up here as
+    "UNSTABLE" even before/without looking at the calibration numbers.
+
+    Returns one of:
+      "N/A (no data)"          - this cycle's read failed, nothing to
+                                  compare
+      "N/A (first reading)"    - no previous reading yet for this sensor
+      "STABLE"                 - Roll, Pitch, and Yaw all changed less
+                                  than STABILITY_THRESHOLD_DEG since the
+                                  last reading
+      "UNSTABLE (fluctuating)" - at least one of Roll/Pitch/Yaw changed
+                                  by more than STABILITY_THRESHOLD_DEG
+    """
+    # ADDED: no reading this cycle -> nothing to evaluate.
+    if current_reading is None:
+        return "N/A (no data)"
+
+    # ADDED: look up this sensor's last reading (None if this is the
+    # very first one we've seen for it).
+    previous_reading = _last_readings_for_stability.get(sensor_name)
+
+    # ADDED: always remember the latest reading for the NEXT comparison,
+    # including on this very first call.
+    _last_readings_for_stability[sensor_name] = current_reading
+
+    # ADDED: nothing to compare against yet on the first ever reading.
+    if previous_reading is None:
+        return "N/A (first reading)"
+
+    # ADDED: how much Roll and Pitch changed since the last reading.
+    delta_roll = abs(current_reading["roll_deg"] - previous_reading["roll_deg"])
+    delta_pitch = abs(current_reading["pitch_deg"] - previous_reading["pitch_deg"])
+
+    # ADDED: Yaw wraps around at 0/360 degrees (e.g. 359 -> 1 is really
+    # only a 2-degree change, not a 358-degree jump), so the raw
+    # difference is corrected for that wraparound before comparing it
+    # against the threshold — otherwise a stable sensor sitting right at
+    # the 0/360 boundary would be wrongly flagged as UNSTABLE.
+    raw_delta_yaw = abs(current_reading["yaw_deg"] - previous_reading["yaw_deg"])
+    delta_yaw = min(raw_delta_yaw, 360 - raw_delta_yaw)
+
+    # ADDED: if ANY of the three axes jumped more than the threshold,
+    # call it unstable; otherwise it's stable.
+    if max(delta_roll, delta_pitch, delta_yaw) > STABILITY_THRESHOLD_DEG:
+        return "UNSTABLE (fluctuating)"
+    return "STABLE"
+
+
+# --------------------------------------------------------------------------
 # HUMAN-READABLE PRINTING
 # --------------------------------------------------------------------------
 def format_reading(data):
@@ -453,14 +533,24 @@ def run_read_loop(imu1, imu2, csv_file, csv_writer):
             should_print = cycle % PRINT_EVERY_N_CYCLES == 0
 
             reading1 = imu1.read_orientation()
+            # ADDED: check IMU-1's stability every cycle (not just when
+            # printing), so the "previous reading" used for comparison
+            # stays up to date even on cycles where nothing is displayed.
+            stability1 = get_stability_status("IMU-1", reading1)
             if should_print:
                 print(format_reading(reading1))
+                # ADDED: show IMU-1's stability right under its reading.
+                print(f"  -> IMU-1 status: {stability1}")
             log_reading_to_csv(csv_writer, reading1)
 
             if imu2 is not None:
                 reading2 = imu2.read_orientation()
+                # ADDED: same stability check for IMU-2.
+                stability2 = get_stability_status("IMU-2", reading2)
                 if should_print:
                     print(format_reading(reading2))
+                    # ADDED: show IMU-2's stability right under its reading.
+                    print(f"  -> IMU-2 status: {stability2}")
                 log_reading_to_csv(csv_writer, reading2)
 
             if cycle % CSV_FLUSH_EVERY_N_CYCLES == 0:
