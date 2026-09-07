@@ -1,136 +1,216 @@
-# BNO055 Dual-IMU Connection Guide (I2C)
+# V3_two_sensor_IMU_code.py — Technical Documentation
 
-This document explains how to physically wire **two BNO055 IMU sensors** to
-a Raspberry Pi (or any I2C host, e.g. Arduino/ESP32) on a **single shared
-I2C bus**, and how the accompanying `bno055_dual_imu.py` script reads
-Roll / Pitch / Yaw from both of them.
-
----
-
-## 1. Why two sensors can share one I2C bus
-
-I2C allows multiple devices on the same two wires (SDA/SCL) as long as each
-device has a **unique 7-bit address**. The BNO055 supports exactly two
-addresses, selected by its `ADR` (address) pin:
-
-| ADR pin state | I2C Address |
-|----------------|-------------|
-| LOW (tied to GND) | `0x28` (default) |
-| HIGH (tied to 3.3V) | `0x29` |
-
-By tying one sensor's `ADR` pin to GND and the other's to 3.3V, both can sit
-on the same SDA/SCL lines without conflicting.
+This documents exactly what `V3_two_sensor_IMU_code.py` does as it
+currently stands, including the sensor-stability indicator added on top
+of the original script. For physical wiring, see `BNO055_Wiring_Guide.md`.
+For a browser-based view of this same data, see `imu_web_dashboard.py`
+(covered at the end of this document).
 
 ---
 
-## 2. Pinout Reference (BNO055 breakout, e.g. Adafruit #4646)
+## 1. What this script does
 
-| BNO055 Pin | Function |
-|------------|----------|
-| VIN | Power input (3.3–5V depending on board's onboard regulator) |
-| 3Vo | 3.3V output from onboard regulator (not used here) |
-| GND | Ground |
-| SDA | I2C data line |
-| SCL | I2C clock line |
-| RST | Reset (active low) — optional, can leave unconnected |
-| INT | Interrupt output — optional, not used in this script |
-| PS0 / PS1 | Protocol select — leave floating/GND for I2C mode (default) |
-| ADR | Address select — GND = 0x28, 3.3V = 0x29 |
+Reads orientation from one or two Bosch BNO055 9-DOF IMU sensors on a
+shared I2C bus, and for each sensor prints:
 
----
+- **Roll, Pitch, Yaw** in human-readable degrees
+- **Calibration status** (System / Gyro / Accel / Mag, each 0–3)
+- **Stability status** — whether the sensor's output is currently steady
+  or fluctuating (see [Section 5](#5-sensor-stability-indicator))
 
-## 3. Wiring Diagram (Raspberry Pi 40-pin header)
-
-```
-                        Raspberry Pi
-                    ┌───────────────────┐
-        3.3V  Pin1  │ ●                 │
-                     │                   │
-   SDA1  Pin3 (GPIO2)│ ●─────────────┬───┼──── SDA ──── BNO055 #1
-                     │               │   │              │
-   SCL1  Pin5 (GPIO3)│ ●───────────┬─┼───┼──── SCL ──── BNO055 #1
-                     │             │ │   │              │
-         GND  Pin6   │ ●───────┬───┼─┼───┼──── GND ──── BNO055 #1
-                     │         │   │ │   │              │
-                     │         │   │ │   │        ADR ── GND (0x28)
-                     │         │   │ │   │              │
-                     │         │   └─┼───┼──── SDA ──── BNO055 #2
-                     │         │     │   │              │
-                     │         └─────┼───┼──── SCL ──── BNO055 #2  [same
-                     │               │   │              │           bus]
-                     │               │   │        GND ── (shared with above)
-                     │               │   │              │
-                     │               └───┼──── VIN ──── BNO055 #2
-                     │                   │        ADR ── 3.3V (0x29)
-                     └───────────────────┘
-```
-
-### Summary table
-
-| Signal | Raspberry Pi Pin | BNO055 #1 | BNO055 #2 |
-|--------|------------------|-----------|-----------|
-| Power (VIN) | Pin 1 (3.3V) or Pin 2 (5V) | VIN | VIN (shared rail) |
-| Ground | Pin 6 (GND) | GND | GND (shared) |
-| I2C Data | Pin 3 (GPIO2 / SDA1) | SDA | SDA (shared bus) |
-| I2C Clock | Pin 5 (GPIO3 / SCL1) | SCL | SCL (shared bus) |
-| Address select | — | ADR → GND (addr `0x28`) | ADR → 3.3V (addr `0x29`) |
-
-> **Note:** Both sensors connect to the *same* SDA and SCL pins on the Pi —
-> you are not using two separate I2C buses, just wiring in parallel. This is
-> the standard multi-device I2C topology.
-
-> **Pull-up resistors:** The Raspberry Pi's I2C pins have onboard pull-ups
-> enabled by default, so no external resistors are normally required for two
-> short-wired BNO055 boards. If you see intermittent bus errors over longer
-> wire runs, add 4.7kΩ pull-ups from SDA and SCL to 3.3V.
+Every successful reading is also appended to a CSV log file for later
+analysis.
 
 ---
 
-## 4. Software Setup
+## 2. Requirements
 
+**Hardware**
+- Raspberry Pi (any model with an I2C header — this was built/tested
+  against a Raspberry Pi 5)
+- One or two BNO055 breakout boards
+- Jumper wires
+
+**Software**
 ```bash
-# 1. Enable I2C on the Raspberry Pi
-sudo raspi-config
-#   -> Interface Options -> I2C -> Enable -> Reboot
+sudo pip3 install --break-system-packages \
+    adafruit-circuitpython-bno055 \
+    adafruit-blinka
+```
+I2C must be enabled first: `sudo raspi-config` → *Interface Options* →
+*I2C* → *Enable*.
 
-# 2. Install required Python libraries
-sudo pip3 install --break-system-packages adafruit-circuitpython-bno055 adafruit-blinka
-
-# 3. Confirm both sensors are detected on the bus
+Confirm both sensors are visible before running the script:
+```bash
 i2cdetect -y 1
-#   Expect to see entries at 0x28 and 0x29 in the grid output
+# Expect entries at 0x28 and 0x29
 ```
 
 ---
 
-## 5. Running the script
+## 3. Configuration reference
 
-```bash
-python3 bno055_dual_imu.py
-```
+All of these are constants near the top of the file — edit them directly
+to change behavior, no command-line flags needed.
 
-Example output:
-```
-[IMU-1 @ 0x28]  Roll:    1.25°   Pitch:   -0.42°   Yaw:  183.60°   (Cal S:3 G:3 A:3 M:2)
-[IMU-2 @ 0x29]  Roll:   -3.10°   Pitch:    2.05°   Yaw:   45.90°   (Cal S:2 G:3 A:2 M:1)
-----------------------------------------------------------------------
-```
-
-- **Roll** — rotation about the X axis (tilting side to side)
-- **Pitch** — rotation about the Y axis (tilting forward/back)
-- **Yaw** — rotation about the Z axis (compass heading, 0–360°)
-- **Calibration (S/G/A/M)** — System/Gyroscope/Accelerometer/Magnetometer,
-  each 0 (uncalibrated) to 3 (fully calibrated). For reliable Yaw readings,
-  move the sensor in a figure-8 pattern until the Magnetometer value reaches 3.
-
----
-
-## 6. Troubleshooting
-
-| Symptom | Likely Cause | Fix |
+| Constant | Default | What it controls |
 |---|---|---|
-| `i2cdetect` shows nothing | Wiring or I2C not enabled | Recheck SDA/SCL, re-run `raspi-config` |
-| Only one address shows (e.g. only `0x28`) | Second sensor's ADR pin not tied HIGH, or not powered | Confirm ADR → 3.3V, confirm VIN has power |
-| Yaw drifts / jumps randomly | Magnetometer near motors, magnets, or metal | Mount IMU away from motors/thrusters and ferrous parts, recalibrate |
-| `OSError: [Errno 121] Remote I/O error` | Loose wiring or bus contention | Reseat connections, add pull-up resistors, shorten wires |
-| Pitch stuck at ±90° | Gimbal lock in manual quaternion math | Use the built-in `sensor.euler` (already default in the script) instead of the manual `quaternion_to_euler()` fallback |
+| `SENSOR_1_ADDRESS` | `0x28` | I2C address of the first sensor (ADR pin → GND) |
+| `SENSOR_2_ADDRESS` | `0x29` | I2C address of the second sensor (ADR pin → 3.3V) |
+| `SINGLE_SENSOR_MODE` | `False` | Set `True` to run with only sensor #1 connected |
+| `READ_INTERVAL_S` | `0.1` | Poll rate — `0.1` = 10Hz |
+| `READ_RETRIES` | `2` | Retries on a transient I2C read error before giving up that cycle |
+| `RETRY_DELAY_S` | `0.01` | Delay between retries |
+| `CALIBRATION_READ_EVERY_N_CYCLES` | `10` | How often calibration status is re-read (it changes far slower than orientation, so it isn't read every cycle) |
+| `I2C_FREQUENCY_HZ` | `400000` | I2C bus speed (Fast Mode). Helps only marginally on the BNO055 specifically — see the comment in the script for why |
+| `PRINT_EVERY_N_CYCLES` | `1` | How often a reading is printed to the console. Raise this (e.g. `5`) if console output is too fast to read |
+| `CSV_FLUSH_EVERY_N_CYCLES` | `1` | How often the CSV file is flushed to disk |
+| `CSV_LOG_DIR` | `"logs"` | Folder the CSV log is written into (relative to wherever you run the script from) |
+| **`STABILITY_THRESHOLD_DEG`** | **`2.0`** | **Added.** Max allowed change (degrees) in Roll/Pitch/Yaw between two consecutive readings before a sensor is flagged `UNSTABLE` — see Section 5 |
+
+---
+
+## 4. How the read loop works
+
+1. `validate_config()` — checks that none of the cycle-throttling
+   constants above are set to `0` (which would crash the loop with a
+   divide-by-zero); exits cleanly with a clear message if so.
+2. `setup_sensors()` — opens the shared I2C bus and connects to
+   whichever sensor(s) are configured. If neither sensor connects, the
+   script exits with a message pointing at `i2cdetect -y 1`.
+3. `run_read_loop()` — the main loop:
+   - Reads each sensor (`BNO055Sensor.read_orientation()`), which
+     retries transient I2C errors up to `READ_RETRIES` times before
+     giving up for that cycle and returning `None`.
+   - Computes each sensor's stability status (see Section 5).
+   - Prints the reading + stability line (throttled by
+     `PRINT_EVERY_N_CYCLES`).
+   - Logs the reading to CSV (a failed/`None` reading is silently
+     skipped — not written as a row).
+   - Holds a fixed sample rate using `time.monotonic()`, so a slow
+     cycle (e.g. one that hit a retry) doesn't cause the whole run to
+     drift behind schedule.
+4. On Ctrl+C, `main()` flushes and closes the CSV file and releases the
+   I2C bus (`i2c.deinit()`) before exiting — skipping that release step
+   is a known cause of the *next* run failing to reopen the I2C bus
+   without a reboot.
+
+---
+
+## 5. Sensor stability indicator
+
+This is the addition made on top of the original script. It answers a
+different question than the calibration numbers do:
+
+- **Calibration status** (`Cal S:_ G:_ A:_ M:_`) reports the sensor's own
+  *internal* calibration state.
+- **Stability status** (new) reports whether the *actual values coming
+  out* are currently jumping around or holding steady — a more direct
+  answer to "is this sensor behaving reliably right now?"
+
+**How it works** (`get_stability_status()`): each cycle, the current
+Roll/Pitch/Yaw is compared to that same sensor's previous reading.
+
+- If **any** of Roll, Pitch, or Yaw changed by more than
+  `STABILITY_THRESHOLD_DEG` (default `2.0°`) since the last reading, the
+  sensor is reported `UNSTABLE (fluctuating)`.
+- Otherwise it's `STABLE`.
+- Three edge cases are handled explicitly:
+  - **No data this cycle** → `N/A (no data)`
+  - **No previous reading yet** (first cycle for that sensor) →
+    `N/A (first reading)`
+  - **Yaw wraparound**: Yaw is a 0–360° compass heading, so a change
+    from 359° to 1° is really only a 2° rotation, not a 358° jump. The
+    comparison corrects for this so a sensor sitting still near that
+    boundary isn't falsely flagged as unstable.
+
+**What you'll see in the console:**
+```
+[IMU-1 @ 0x28]  Roll:   -3.75°   Pitch:  177.56°   Yaw:  274.31°   (Cal S:3 G:3 A:0 M:3)
+  -> IMU-1 status: STABLE
+[IMU-2 @ 0x29]  Roll:    2.10°   Pitch:   45.03°   Yaw:  118.92°   (Cal S:0 G:1 A:0 M:0)
+  -> IMU-2 status: UNSTABLE (fluctuating)
+```
+
+**Common cause of `UNSTABLE`, especially on Yaw specifically**: the
+magnetometer hasn't calibrated yet (`Cal ... M:0`). Rotating the sensor
+through a figure-8 motion, then holding it briefly in a few different
+tilted orientations, is what raises magnetometer calibration — see
+`BNO055_Wiring_Guide.md` for the full calibration procedure and
+troubleshooting table.
+
+**Design notes:**
+- This is purely additive — nothing in `BNO055Sensor` or the original
+  read/print/log logic was modified to add it.
+- Stability is tracked per-sensor-name in a module-level dictionary
+  (`_last_readings_for_stability`), independent of the calibration
+  tracking already inside `BNO055Sensor`.
+- The stability check runs every cycle (not just when printing), so the
+  "previous reading" used for comparison always reflects the true
+  previous cycle rather than the previous *printed* one.
+
+---
+
+## 6. CSV log format
+
+Written to `logs/imu_log_<timestamp>.csv` by default (a fresh file per
+run). Columns:
+
+| Column | Meaning |
+|---|---|
+| `timestamp` | ISO 8601 timestamp (millisecond precision) of this reading |
+| `sensor_name` | `IMU-1` or `IMU-2` |
+| `address` | I2C address as hex string (e.g. `0x28`) |
+| `roll_deg`, `pitch_deg`, `yaw_deg` | Orientation in degrees |
+| `cal_system`, `cal_gyro`, `cal_accel`, `cal_mag` | Calibration status, 0–3 each |
+
+Note: the stability status is **not** currently written to this CSV —
+it's console-only. (The companion web dashboard, below, computes its own
+stability independently from this same CSV, using the last two logged
+rows for each sensor.)
+
+---
+
+## 7. Companion: web dashboard
+
+`imu_web_dashboard.py` is a **separate script** that displays this same
+data in a browser instead of the terminal — useful since SSH terminals
+can be hard to read live, especially over a laggy connection.
+
+- It only **reads** the CSV file this script writes — it never imports
+  or talks to `V3_two_sensor_IMU_code.py` directly, so running,
+  stopping, or crashing the dashboard has zero effect on the sensor
+  script.
+- It shows the same Roll/Pitch/Yaw/calibration data, plus its own
+  independently-computed **STABLE / UNSTABLE** badge and a
+  **live/STALE** indicator (stale = no new CSV row for that sensor in
+  the last few seconds, meaning the main script likely stopped or that
+  sensor disconnected).
+
+**To run both together:**
+```bash
+# Terminal 1 — unchanged:
+python3 V3_two_sensor_IMU_code.py
+
+# Terminal 2:
+python3 imu_web_dashboard.py
+```
+Then open `http://<pi-ip-address>:5000` from a phone or laptop browser
+on the same network. Find the Pi's IP with `hostname -I`.
+
+---
+
+## 8. Known limitations
+
+- Stability and calibration status are **not the same signal** and can
+  disagree briefly — e.g. right after picking the sensor up to
+  calibrate it, it will correctly show `UNSTABLE` even as calibration
+  numbers are climbing, since it's genuinely moving at that moment.
+- The stability check has no memory beyond one previous reading — it
+  can't distinguish "briefly unstable due to one noisy sample" from
+  "genuinely and persistently unstable." For that, watch the indicator
+  over several consecutive cycles rather than a single one.
+- `STABILITY_THRESHOLD_DEG` is a single fixed value for all three axes
+  (Roll, Pitch, Yaw). Yaw is inherently noisier pre-calibration than
+  Roll/Pitch, so it's the axis most likely to trip `UNSTABLE` first —
+  this is expected, not a bug.
