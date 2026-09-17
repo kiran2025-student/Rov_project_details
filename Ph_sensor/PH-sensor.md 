@@ -1,0 +1,100 @@
+# PH405C pH Sensor — Arduino Firmware Documentation
+
+## Overview
+This firmware reads analog voltage from a **PH-4502C pH sensor module** connected to an Arduino UNO, converts it to a digital pH value using a linear calibration formula, and prints the result over the Serial Monitor.
+
+| Property | Value |
+|---|---|
+| Microcontroller | Arduino UNO |
+| Sensor | PH-4502C pH sensor module |
+| Analog Pin | A0 |
+| Serial Baud Rate | 9600 |
+| Sampling Method | 15-sample rolling average |
+| Update Interval | ~1.5 s (plus sampling time) |
+
+---
+
+## Pin Configuration
+
+| Signal | Arduino Pin |
+|---|---|
+| pH Sensor Analog Output | A0 |
+
+---
+
+## Global Constants & Variables
+
+| Name | Type | Value | Purpose |
+|---|---|---|---|
+| `PH_Pin` | `const int` | `A0` | Analog input pin connected to the sensor |
+| `V_Ref` | `const float` | `5` | ADC reference voltage (Arduino UNO operates at 5V logic) |
+| `ADC_res` | `const float` | `1023` | 10-bit ADC resolution (2¹⁰ − 1) |
+| `sensor_slope` | `float` | `-5.56` | Slope of the voltage-to-pH linear calibration equation |
+| `sensor_offset` | `float` | `20.89` | Offset (intercept) of the calibration equation |
+
+**Calibration source:** values referenced from [cimpleo.com — Arduino pH Meter using PH-4502C](https://cimpleo.com/blog/arduino-ph-meter-using-ph-4502c/)
+
+---
+
+## `setup()`
+- Initializes UART serial communication at **9600 baud**.
+- Prints a firmware banner to the Serial Monitor for identification:
+  ```
+  ===================================
+  ---------PH405C Firm ware----------
+  ===================================
+  ```
+
+---
+
+## `loop()`
+
+### Step 1 — Sampling
+- Takes **15 analog readings** (`total_samples = 15`) from `PH_Pin`.
+- Each reading is separated by a **10 ms delay** to reduce noise/jitter.
+- All readings are summed into `raw_adc_sum`.
+
+### Step 2 — Averaging
+```cpp
+float average_adc = raw_adc_sum / total_samples;
+```
+Produces a smoothed ADC reading, reducing the effect of electrical noise from a single sample.
+
+### Step 3 — Voltage Conversion
+```cpp
+float voltage = average_adc * (V_Ref / ADC_res);
+```
+Converts the averaged 10-bit ADC value (0–1023) into an actual voltage (0–5V) based on the Arduino's reference voltage.
+
+### Step 4 — pH Calculation
+```cpp
+float caluculated_ph = (sensor_slope * voltage) + sensor_offset;
+```
+Applies the linear calibration equation:
+
+**pH = (slope × voltage) + offset**
+
+### Step 5 — Output
+Prints the following to the Serial Monitor every cycle:
+- Raw ADC average (1 decimal place)
+- Sensor voltage (3 decimal places)
+- Final calculated pH value (2 decimal places)
+
+Then waits **1500 ms** before repeating the loop.
+
+---
+
+## Suggested Improvements
+1. **Serial output formatting** — current `Serial.print()` calls run together without line breaks or spacing, producing hard-to-read output like:
+   ```
+   raw ADC Avg: 512.3sensor voltage: 2.500Final PH value7.06
+   ```
+   Consider adding `\t` or `Serial.println()` between fields, e.g.:
+   ```cpp
+   Serial.print("Raw ADC Avg: "); Serial.print(average_adc, 1);
+   Serial.print(" | Sensor Voltage: "); Serial.print(voltage, 3);
+   Serial.print(" | pH: "); Serial.println(caluculated_ph, 2);
+   ```
+2. **Variable naming** — `caluculated_ph` has a typo (should be `calculated_ph`); harmless but worth cleaning up for readability.
+3. **Calibration verification** — since `sensor_slope`/`sensor_offset` were sourced externally, recalibrate using pH 4.0, 7.0, and 10.0 buffer solutions for accuracy with your specific sensor unit.
+4. **Temperature compensation** — pH readings are temperature-sensitive; consider adding a temperature sensor (e.g., DS18B20) and compensation formula for higher accuracy if used outside controlled conditions.
