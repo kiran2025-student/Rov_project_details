@@ -5,9 +5,9 @@
 //pin declaration
 const int PH_Pin = A0;
 
-const float V_Ref = 5; //the voltage declaration help the MC to find the operating voltage and help for the ADC working.
+const float V_Ref = 5.0; //the voltage declaration help the MC to find the operating voltage and help for the ADC working.
 
-const float ADC_res = 1023; //1023 id the ADC resolution of the Arduino
+const float ADC_res = 1023.0; //1023 id the ADC resolution of the Arduino
 
 // the below value are the base value used to convert the  standard PH scale.
 // the below values considered from a https://cimpleo.com/blog/arduino-ph-meter-using-ph-4502c/
