@@ -1,59 +1,46 @@
-//PH sensor code
-//Micro-controller: Arduino UNO
-//WARNING 
-//i have fixed the voltage rating for ADC but in real time working it might change so during the testing check the PH value for both.
-//pin declaration
-const int PH_Pin = A0;
+/*
+ * Arduino Code for 4-Pin Single Water Sensor Module
+ * Connect: VCC -> 5V, GND -> GND, Analog Pin (AO/PO/EC) -> A0
+ */
 
-const float V_Ref = 5.0; //the voltage declaration help the MC to find the operating voltage and help for the ADC working.
+const int sensorPin = A0;   // Connect the Analog output pin here
+const float VREF = 5.0;     // Arduino supply voltage
+const int ADC_RES = 1023;   // 10-bit resolution
 
-const float ADC_res = 1023.0; //1023 id the ADC resolution of the Arduino
-
-// the below value are the base value used to convert the  standard PH scale.
-// the below values considered from a https://cimpleo.com/blog/arduino-ph-meter-using-ph-4502c/
-float sensor_slope = -5.56;
-float sensor_offset = 20.89; 
-
-
-void setup(){
-//initializing the communication with Arduino UART
-Serial.begin(9600);
-Serial.println("===================================");
-Serial.println("---------PH405C Firm ware----------");
-Serial.println("===================================");
+void setup() {
+  Serial.begin(9600);
+  Serial.println("--- Single Sensor Module Online ---");
 }
 
 void loop() {
-// collection of the analog value and finding the average value 
-// declaration of the keyword for the for loop 
-int total_samples = 15;
-float raw_adc_sum = 0;
+  // 1. Read the raw analog voltage smoothly
+  float voltage = readAnalogAverage(sensorPin) * (VREF / ADC_RES);
+  
+  // 2. Calculate the metric based on what sensor you have plugged in:
+  
+  // OPTION 1: If this is your pH Sensor board
+  float pH_Value = 7.0 + ((voltage - 2.0) * 4.0); 
 
-//for loop to find the average of the PH value
-for (int i =0; i < total_samples; i++) 
-{
-  raw_adc_sum += analogRead(PH_Pin); //find the average ADC value
-  delay(10); //10ms gap between every ADC value calculation
+  // OPTION 2: If this is your EC / TDS Sensor board
+  // float TDS_Value = voltage * 500.0; 
+
+  // 3. Print out your data
+  Serial.print("Sensor Voltage: "); Serial.print(voltage, 2); Serial.print("V");
+  Serial.print(" | Calculated pH: "); Serial.println(pH_Value, 2);
+  
+  // If using TDS option, uncomment below and comment out pH print lines:
+  // Serial.print(" | Est. TDS: "); Serial.print(TDS_Value, 0); Serial.println(" ppm");
+
+  delay(1500); 
 }
 
-float average_adc = raw_adc_sum / total_samples; //formula for the average value of ADC which give the average value for the better digital value.
-
-//conversion of average ADC value into the DC value.
-float voltage = average_adc * (V_Ref / ADC_res);
-
-//PH value calculation formula
-float caluculated_ph = (sensor_slope * voltage) + sensor_offset;
-
-//serial monitor display
-Serial.print("raw ADC Avg: ");
-Serial.print(average_adc, 1);
-Serial.print("sensor voltage: ");
-Serial.print(voltage, 3);
-Serial.print("Final PH value");
-Serial.print(caluculated_ph, 2);
-delay(1500); 
-
+// Rolling average function to filter out electrical ripples in water
+float readAnalogAverage(int pin) {
+  long total = 0;
+  int samples = 20;
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(pin);
+    delay(10);
+  }
+  return (float)total / samples;
 }
-
-
-
