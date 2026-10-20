@@ -214,31 +214,3 @@ on the same network. Find the Pi's IP with `hostname -I`.
   (Roll, Pitch, Yaw). Yaw is inherently noisier pre-calibration than
   Roll/Pitch, so it's the axis most likely to trip `UNSTABLE` first —
   this is expected, not a bug.
-
----
-
-## V4 dual-sensor Raspberry Pi terminal monitor
-
-The V4 monitor is a separate Python entry-point script in this BNO055 folder:
-
-- [`V4_BNO055_terminal_monitor.py`](V4_BNO055_terminal_monitor.py) reads two BNO055 sensors at I²C addresses `0x28` and `0x29`, displays live readings, and writes timestamped data to CSV.
-- [`bno055_csv_logger.py`](bno055_csv_logger.py) formats and appends sensor rows to `bno055_imu_data.csv`, which can be opened in Excel.
-- [`bno055_human_readable.py`](bno055_human_readable.py) adds plain-language tilt, heading, and calibration descriptions.
-
-Keep all three Python files in the same directory. Install the Adafruit driver and Blinka on the Raspberry Pi, enable I²C, and confirm both addresses appear with `i2cdetect -y 1`. Run the monitor from that directory:
-
-```bash
-python3 V4_BNO055_terminal_monitor.py
-```
-
-Press Ctrl+C to stop. The terminal refreshes about five times per second. Each refresh writes one CSV row per sensor with the same UTC timestamp; new rows append to an existing CSV file. The human-readable tilt labels assume a conventional sensor mounting orientation and may need adjustment for other mountings.
-
-### Single-file V4 option
-
-If you prefer to run one Python file without copying the two helper modules, use [`V4_BNO055_Codex_Written.py`](V4_BNO055_Codex_Written.py). It combines the dual-sensor terminal monitor, timestamped CSV logging, and human-readable orientation descriptions. Install the same Raspberry Pi dependencies, then run:
-
-```bash
-python3 V4_BNO055_Codex_Written.py
-```
-
-This standalone script writes/appends `bno055_imu_data.csv` in the current working directory. The other V4 files remain available as the modular version.
