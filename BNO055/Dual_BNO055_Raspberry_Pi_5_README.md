@@ -233,3 +233,12 @@ python3 V4_BNO055_terminal_monitor.py
 
 Press Ctrl+C to stop. The terminal refreshes about five times per second. Each refresh writes one CSV row per sensor with the same UTC timestamp; new rows append to an existing CSV file. The human-readable tilt labels assume a conventional sensor mounting orientation and may need adjustment for other mountings.
 
+### Single-file V4 option
+
+If you prefer to run one Python file without copying the two helper modules, use [`V4_BNO055_Codex_Written.py`](V4_BNO055_Codex_Written.py). It combines the dual-sensor terminal monitor, timestamped CSV logging, and human-readable orientation descriptions. Install the same Raspberry Pi dependencies, then run:
+
+```bash
+python3 V4_BNO055_Codex_Written.py
+```
+
+This standalone script writes/appends `bno055_imu_data.csv` in the current working directory. The other V4 files remain available as the modular version.
