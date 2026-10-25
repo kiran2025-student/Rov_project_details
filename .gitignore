@@ -1,1 +1,4 @@
-
+# BNO055 local runtime files
+BNO055/V4_BNO055_firmware/.venv/
+BNO055/V4_BNO055_firmware/__pycache__/
+BNO055/V4_BNO055_firmware/*.csv
