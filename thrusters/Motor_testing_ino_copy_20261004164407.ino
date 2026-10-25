@@ -1,41 +1,43 @@
+//this is the motor test code
+
+//use the D9(arduino pin) - signal pin of the ESC 
+
+//comman ground between the arduino and esc.
+
+//in the code we can have a custom values for the PWM in the line 16, 17, 18.
 #include <Servo.h>
 
+Servo esc;
 
-Servo myESC;  // Create servo object to control the ESC
+const byte ESC_SIGNAL_PIN = 9;
 
+// The listing says 1500 µs is stop, >1500 forward, <1500 reverse.
+// Start with small changes from neutral.
+const int NEUTRAL_US = 1500;
+const int FORWARD_US = 2000;
+const int REVERSE_US = 2000;
 
 void setup() {
-  Serial.begin(9600); // Initialize the Serial Monitor at 9600 baud
- 
-  // Attach ESC to Pin 9 with standard timing bounds (1000us to 2000us)
-  myESC.attach(9, 1000, 2000);
- 
-  Serial.println("--- ESC Initialization ---");
-  Serial.println("Sending low pulse to arm the ESC...");
- 
-  // SimonK safety arming routine
-  myESC.write(0);
-  delay(4000); // Give the ESC 4 seconds to boot up and finish arming beeps
- 
-  Serial.println("ESC Armed successfully!");
-  Serial.println("Enter a speed value between 0 (Stop) and 180 (Full Speed):");
-}
+  esc.attach(ESC_SIGNAL_PIN, 1000, 2000);
 
+  // Give the ESC a neutral signal while it initializes.
+  esc.writeMicroseconds(NEUTRAL_US);
+  delay(3000);
+}
 
 void loop() {
-  // Check if you have typed a number into the Serial Monitor
-  if (Serial.available() > 0) {
-    int speedVal = Serial.parseInt(); // Read the typed integer
-   
-    // Constrain the value to safe servo limits
-    speedVal = constrain(speedVal, 0, 180);
-   
-    Serial.print("Setting motor throttle to: ");
-    Serial.println(speedVal);
-   
-    myESC.write(speedVal); // Send the pulse to the ESC
-  }
+  esc.writeMicroseconds(NEUTRAL_US);
+  delay(2000);
+
+  esc.writeMicroseconds(FORWARD_US);
+  delay(1000);
+
+  esc.writeMicroseconds(NEUTRAL_US);
+  delay(2000);
+
+  esc.writeMicroseconds(REVERSE_US);
+  delay(1000);
+
+  esc.writeMicroseconds(NEUTRAL_US);
+  delay(5000);
 }
-
-
-
