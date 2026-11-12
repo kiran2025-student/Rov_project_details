@@ -1,10 +1,33 @@
 import time
-from motor_control import MotorController
 
-motors = MotorController(i2c)  # Sends neutral to all configured ESCs
-time.sleep(3)                   # Allow ESCs to arm
+import board
+import busio
+from adafruit_pca9685 import PCA9685
 
-motors.set_motor("motor_1", 0.20)  # Forward, low test speed
-motors.set_motor("motor_2", -0.20) # Reverse, low test speed
-motors.stop_motor("motor_1")       # Stop only motor 1
-motors.stop_all()                  # Stop all motors
+# Create the I2C bus and PCA9685 at its default address.
+i2c = busio.I2C(board.SCL, board.SDA)
+pca = PCA9685(i2c, address=0x40)
+pca.frequency = 50
+
+# ESC control pulse settings, in microseconds.
+NEUTRAL_US = 1500
+FORWARD_US = 1600
+
+def send_esc_pulse(channel, pulse_us):
+    # Convert the pulse length to the 16-bit duty cycle used by the library.
+    duty = round(pulse_us * pca.frequency * 65535 / 1_000_000)
+    pca.channels[channel].duty_cycle = duty
+
+try:
+    # Give the ESC neutral while it starts.
+    send_esc_pulse(0, NEUTRAL_US)
+    time.sleep(3)
+
+    # Run the motor forward briefly, then return to neutral.
+    send_esc_pulse(0, FORWARD_US)
+    time.sleep(2)
+    send_esc_pulse(0, NEUTRAL_US)
+
+finally:
+    # Leave the ESC at neutral if the program exits.
+    send_esc_pulse(0, NEUTRAL_US)
